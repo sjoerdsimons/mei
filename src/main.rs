@@ -1,15 +1,21 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::os::unix::io::AsRawFd;
-
-// MEI IOCTL definitions
-const MEI_IOCTL_MAGIC: u8 = b'H';
-const MEI_CONNECT_CLIENT_IOCTL_NUMBER: u8 = 0x01;
+use zerocopy::{AsBytes, FromBytes, FromZeroes};
+use nix::ioctl_readwrite;
 
 // AMT (HECI) Client UUID:  12f80028-b4b7-4b2d-aca8-46e0ff65814c
 // This is actually MKHI (Host Interface), the main AMT communication interface
+// Note: First 3 fields are stored in little-endian format (uuid_le)
 const AMT_UUID: [u8; 16] = [
-    0x12, 0xf8, 0x00, 0x28, 0xb4, 0xb7, 0x4b, 0x2d, 0xac, 0xa8, 0x46, 0xe0, 0xff, 0x65, 0x81, 0x4c,
+    // 12f80028 in LE: 28 00 f8 12
+    0x28, 0x00, 0xf8, 0x12,
+    // b4b7 in LE: b7 b4
+    0xb7, 0xb4,
+    // 4b2d in LE: 2d 4b
+    0x2d, 0x4b,
+    // Last 8 bytes stay as-is
+    0xac, 0xa8, 0x46, 0xe0, 0xff, 0x65, 0x81, 0x4c,
 ];
 
 #[repr(C)]
@@ -27,15 +33,18 @@ struct MeiClient {
 }
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
-struct MeiConnectClientData {
+#[derive(Copy, Clone)]
+union MeiConnectClientData {
     in_client_uuid: MeiUuid,
     out_client_properties: MeiClient,
 }
 
+// Define the ioctl using nix's macro
+ioctl_readwrite!(mei_connect_client, b'H', 0x01, MeiConnectClientData);
+
 // HECI message structures for AMT provisioning state
 #[repr(C, packed)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, FromZeroes, FromBytes, AsBytes)]
 struct MkhiMessageHeader {
     group_id: u8,
     command: u8,
@@ -45,23 +54,19 @@ struct MkhiMessageHeader {
 }
 
 #[repr(C, packed)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, FromZeroes, FromBytes, AsBytes)]
 struct ProvisioningStateRequest {
     header: MkhiMessageHeader,
 }
 
 #[repr(C, packed)]
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone, FromZeroes, FromBytes, AsBytes)]
 struct ProvisioningStateResponse {
     header: MkhiMessageHeader,
     provisioning_state: u32,
 }
 
 // MKHI commands
-const MKHI_GEN_GROUP_ID: u8 = 0xFF;
-const MKHI_GET_FW_VERSION_CMD: u8 = 0x02;
-
-// For provisioning state, we use a different group
 const MKHI_FWCAPS_GROUP_ID: u8 = 0x03;
 const MKHI_GET_PROVISIONING_STATE_CMD: u8 = 0x11;
 
@@ -70,45 +75,26 @@ const PROVISIONING_STATE_PRE: u32 = 0;
 const PROVISIONING_STATE_IN: u32 = 1;
 const PROVISIONING_STATE_POST: u32 = 2;
 
-// Helper macro for ioctl
-macro_rules! iowr {
-    ($type:expr, $nr:expr, $size:expr) => {
-        (2u32 << 30) | (($size as u32 & 0x1FFF) << 16) | (($type as u32) << 8) | ($nr as u32)
-    };
-}
-
 fn connect_to_mei_client(file: &File, uuid: &[u8; 16]) -> io::Result<MeiClient> {
     let mut connect_data = MeiConnectClientData {
         in_client_uuid: MeiUuid { data: *uuid },
-        out_client_properties: MeiClient {
-            max_msg_length: 0,
-            protocol_version: 0,
-            reserved: [0; 3],
-        },
     };
 
-    let ioctl_cmd = iowr!(
-        MEI_IOCTL_MAGIC,
-        MEI_CONNECT_CLIENT_IOCTL_NUMBER,
-        std::mem::size_of::<MeiConnectClientData>()
-    );
+    println!("DEBUG: Union size: {}", std::mem::size_of::<MeiConnectClientData>());
 
     unsafe {
-        let ret = libc::ioctl(
-            file.as_raw_fd(),
-            ioctl_cmd as libc::c_ulong,
-            &mut connect_data as *mut MeiConnectClientData,
-        );
-
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        mei_connect_client(file.as_raw_fd(), &mut connect_data)
+            .map_err(|e| {
+                eprintln!("DEBUG: ioctl error code: {}", e);
+                io::Error::from_raw_os_error(e as i32)
+            })?;
+        
+        // After the ioctl, the union contains out_client_properties
+        Ok(connect_data.out_client_properties)
     }
-
-    Ok(connect_data.out_client_properties)
 }
 
-fn get_provisioning_state(mut file: &File) -> io::Result<u32> {
+fn get_provisioning_state(file: &mut File) -> io::Result<u32> {
     // Create the request message
     let request = ProvisioningStateRequest {
         header: MkhiMessageHeader {
@@ -120,39 +106,50 @@ fn get_provisioning_state(mut file: &File) -> io::Result<u32> {
         },
     };
 
-    // Send the request
-    let request_bytes = unsafe {
-        std::slice::from_raw_parts(
-            &request as *const _ as *const u8,
-            std::mem::size_of::<ProvisioningStateRequest>(),
-        )
-    };
+    println!("DEBUG: Sending request, size: {}", std::mem::size_of::<ProvisioningStateRequest>());
+    
+    // Send the request using standard Write trait
+    use std::io::Write;
+    file.write_all(request.as_bytes())?;
+    file.flush()?;
+    println!("DEBUG: Wrote {} bytes", request.as_bytes().len());
 
-    file.write_all(request_bytes)?;
-
-    // Read the response
+    // Read the response - will block until data is available
     let mut response_buf = [0u8; 512];
     let bytes_read = file.read(&mut response_buf)?;
+
+    println!("DEBUG: Read {} bytes from device", bytes_read);
+    println!("DEBUG: Expected at least {} bytes", std::mem::size_of::<ProvisioningStateResponse>());
+    
+    if bytes_read > 0 {
+        println!("DEBUG: First {} bytes: {:02x?}", bytes_read.min(16), &response_buf[..bytes_read.min(16)]);
+    }
 
     if bytes_read < std::mem::size_of::<ProvisioningStateResponse>() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "Response too short",
+            format!("Response too short: got {} bytes, need {}", bytes_read, std::mem::size_of::<ProvisioningStateResponse>()),
         ));
     }
 
-    let response = unsafe { &*(response_buf.as_ptr() as *const ProvisioningStateResponse) };
+    // Use zerocopy to safely read the response
+    let response = ProvisioningStateResponse::read_from_prefix(&response_buf[..bytes_read])
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Failed to parse response"))?;
 
     println!("Response header: {:?}", response.header);
 
-    if response.header.result != 0 {
+    // Read result field safely using raw pointer to avoid alignment issues
+    let result = unsafe { std::ptr::addr_of!(response.header.result).read_unaligned() };
+    
+    if result != 0 {
         return Err(io::Error::new(
             io::ErrorKind::Other,
-            format!("ME returned error: {}", response.header.result),
+            format!("ME returned error: {}", result),
         ));
     }
 
-    Ok(response.provisioning_state)
+    // Read provisioning_state safely using raw pointer
+    Ok(unsafe { std::ptr::addr_of!(response.provisioning_state).read_unaligned() })
 }
 
 fn provisioning_state_to_string(state: u32) -> &'static str {
@@ -165,9 +162,10 @@ fn provisioning_state_to_string(state: u32) -> &'static str {
 }
 
 fn main() -> io::Result<()> {
-    println!("Opening /dev/mei0.. .");
+    println!("Opening /dev/mei0...");
 
-    let file = OpenOptions::new()
+    // Open in blocking mode (without O_NONBLOCK)
+    let mut file = OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/mei0")?;
@@ -175,12 +173,12 @@ fn main() -> io::Result<()> {
     println!("Connecting to AMT/MKHI client...");
     let client = connect_to_mei_client(&file, &AMT_UUID)?;
 
-    println!("Connected!  Client properties:");
+    println!("Connected! Client properties:");
     println!("  Max message length: {}", client.max_msg_length);
     println!("  Protocol version: {}", client.protocol_version);
 
     println!("\nQuerying AMT provisioning state...");
-    match get_provisioning_state(&file) {
+    match get_provisioning_state(&mut file) {
         Ok(state) => {
             println!("\n=== AMT Provisioning State ===");
             println!("State value: {}", state);
