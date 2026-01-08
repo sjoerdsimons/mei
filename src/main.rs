@@ -57,12 +57,33 @@ struct AmtHostIfRespHeader {
     status: u32,
 }
 
+#[repr(C, packed)]
+#[derive(Copy, Clone, FromZeroes, FromBytes, AsBytes)]
+struct AmtUnicodeString {
+    length: u16,
+    string: [u8; AMT_UNICODE_STRING_LEN],
+}
+
+#[repr(C, packed)]
+#[derive(Copy, Clone, FromZeroes, FromBytes, AsBytes)]
+struct AmtVersionType {
+    description: AmtUnicodeString,
+    version: AmtUnicodeString,
+}
+
 // AMT protocol version
 const AMT_MAJOR_VERSION: u8 = 1;
 const AMT_MINOR_VERSION: u8 = 1;
 
 // AMT Host Interface commands
+const AMT_HOST_IF_CODE_VERSIONS_REQUEST: u32 = 0x0400001A;
+const AMT_HOST_IF_PROVISIONING_MODE_REQUEST: u32 = 0x04000008;
 const AMT_HOST_IF_PROVISIONING_STATE_REQUEST: u32 = 0x04000011;
+
+// Constants for version parsing
+const AMT_BIOS_VERSION_LEN: usize = 65;
+const AMT_VERSIONS_NUMBER: usize = 50;
+const AMT_UNICODE_STRING_LEN: usize = 20;
 
 // Provisioning states
 const PROVISIONING_STATE_PRE: u32 = 0;
@@ -82,14 +103,14 @@ fn connect_to_mei_client(file: &File, uuid: &[u8; 16]) -> io::Result<MeiClient> 
     }
 }
 
-fn get_provisioning_state(file: &mut File) -> io::Result<u32> {
+fn send_amt_request(file: &mut File, command: u32) -> io::Result<Vec<u8>> {
     let request = AmtHostIfMsgHeader {
         version: AmtVersion {
             major: AMT_MAJOR_VERSION,
             minor: AMT_MINOR_VERSION,
         },
         _reserved: 0,
-        command: AMT_HOST_IF_PROVISIONING_STATE_REQUEST,
+        command,
         length: 0,
     };
 
@@ -97,7 +118,7 @@ fn get_provisioning_state(file: &mut File) -> io::Result<u32> {
     file.write_all(request.as_bytes())?;
     file.flush()?;
 
-    let mut response_buf = [0u8; 512];
+    let mut response_buf = vec![0u8; 8192];
     let bytes_read = file.read(&mut response_buf)?;
 
     if bytes_read == 0 {
@@ -107,14 +128,21 @@ fn get_provisioning_state(file: &mut File) -> io::Result<u32> {
         ));
     }
 
-    if bytes_read < std::mem::size_of::<AmtHostIfRespHeader>() {
+    response_buf.truncate(bytes_read);
+    Ok(response_buf)
+}
+
+fn get_provisioning_mode(file: &mut File) -> io::Result<u32> {
+    let response_buf = send_amt_request(file, AMT_HOST_IF_PROVISIONING_MODE_REQUEST)?;
+
+    if response_buf.len() < std::mem::size_of::<AmtHostIfRespHeader>() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Response too short: got {} bytes", bytes_read),
+            format!("Response too short: got {} bytes", response_buf.len()),
         ));
     }
 
-    let response = AmtHostIfRespHeader::read_from_prefix(&response_buf[..bytes_read])
+    let response = AmtHostIfRespHeader::read_from_prefix(&response_buf)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Failed to parse response"))?;
 
     let status = unsafe { std::ptr::addr_of!(response.status).read_unaligned() };
@@ -126,7 +154,45 @@ fn get_provisioning_state(file: &mut File) -> io::Result<u32> {
     }
 
     let data_offset = std::mem::size_of::<AmtHostIfRespHeader>();
-    if bytes_read < data_offset + 1 {
+    if response_buf.len() < data_offset + 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Response missing provisioning mode data",
+        ));
+    }
+
+    let mode = u32::from_le_bytes([
+        response_buf[data_offset],
+        response_buf[data_offset + 1],
+        response_buf[data_offset + 2],
+        response_buf[data_offset + 3],
+    ]);
+    Ok(mode)
+}
+
+fn get_provisioning_state(file: &mut File) -> io::Result<u32> {
+    let response_buf = send_amt_request(file, AMT_HOST_IF_PROVISIONING_STATE_REQUEST)?;
+
+    if response_buf.len() < std::mem::size_of::<AmtHostIfRespHeader>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Response too short: got {} bytes", response_buf.len()),
+        ));
+    }
+
+    let response = AmtHostIfRespHeader::read_from_prefix(&response_buf)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Failed to parse response"))?;
+
+    let status = unsafe { std::ptr::addr_of!(response.status).read_unaligned() };
+    if status != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("AMT returned error status: 0x{:08x}", status),
+        ));
+    }
+
+    let data_offset = std::mem::size_of::<AmtHostIfRespHeader>();
+    if response_buf.len() < data_offset + 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Response missing provisioning state data",
@@ -136,12 +202,105 @@ fn get_provisioning_state(file: &mut File) -> io::Result<u32> {
     Ok(response_buf[data_offset] as u32)
 }
 
+fn get_code_versions(file: &mut File) -> io::Result<Vec<(String, String)>> {
+    let response_buf = send_amt_request(file, AMT_HOST_IF_CODE_VERSIONS_REQUEST)?;
+
+    if response_buf.len() < std::mem::size_of::<AmtHostIfRespHeader>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Response too short: got {} bytes", response_buf.len()),
+        ));
+    }
+
+    let response = AmtHostIfRespHeader::read_from_prefix(&response_buf)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Failed to parse response"))?;
+
+    let status = unsafe { std::ptr::addr_of!(response.status).read_unaligned() };
+    if status != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("AMT returned error status: 0x{:08x}", status),
+        ));
+    }
+
+    let data_offset = std::mem::size_of::<AmtHostIfRespHeader>();
+    let data_len = response_buf.len() - data_offset;
+
+    // Check we have at least BIOS version + count
+    if data_len < AMT_BIOS_VERSION_LEN + 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Response too short for version data: got {} bytes, need at least {}",
+                data_len,
+                AMT_BIOS_VERSION_LEN + 4
+            ),
+        ));
+    }
+
+    // Read count from the data
+    let count_offset = data_offset + AMT_BIOS_VERSION_LEN;
+    let count = u32::from_le_bytes([
+        response_buf[count_offset],
+        response_buf[count_offset + 1],
+        response_buf[count_offset + 2],
+        response_buf[count_offset + 3],
+    ]) as usize;
+
+    let mut result = Vec::new();
+    let versions_offset = count_offset + 4;
+
+    // Parse each version entry
+    for i in 0..count.min(AMT_VERSIONS_NUMBER) {
+        let entry_offset = versions_offset + i * std::mem::size_of::<AmtVersionType>();
+
+        if entry_offset + std::mem::size_of::<AmtVersionType>() > response_buf.len() {
+            break; // Not enough data for this entry
+        }
+
+        let version_type = AmtVersionType::read_from_prefix(&response_buf[entry_offset..])
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "Failed to parse version entry")
+            })?;
+
+        let desc_len =
+            unsafe { std::ptr::addr_of!(version_type.description.length).read_unaligned() }
+                as usize;
+        let ver_len =
+            unsafe { std::ptr::addr_of!(version_type.version.length).read_unaligned() } as usize;
+
+        if desc_len > AMT_UNICODE_STRING_LEN || ver_len > AMT_UNICODE_STRING_LEN {
+            continue;
+        }
+
+        let description = String::from_utf8_lossy(&version_type.description.string[..desc_len])
+            .trim_end_matches('\0')
+            .to_string();
+        let version = String::from_utf8_lossy(&version_type.version.string[..ver_len])
+            .trim_end_matches('\0')
+            .to_string();
+
+        result.push((description, version));
+    }
+
+    Ok(result)
+}
+
 fn provisioning_state_to_string(state: u32) -> &'static str {
     match state {
         PROVISIONING_STATE_PRE => "Pre-provisioning (not configured)",
         PROVISIONING_STATE_IN => "In provisioning (being configured)",
         PROVISIONING_STATE_POST => "Post-provisioning (configured)",
         _ => "Unknown state",
+    }
+}
+
+fn provisioning_mode_to_string(mode: u32) -> &'static str {
+    match mode {
+        0 => "None",
+        1 => "Enterprise",
+        2 => "Small Business",
+        _ => "Unknown mode",
     }
 }
 
@@ -160,12 +319,39 @@ fn main() -> io::Result<()> {
     println!("  Max message length: {}", client.max_msg_length);
     println!("  Protocol version: {}", client.protocol_version);
 
-    println!("\nQuerying AMT provisioning state...");
-    let state = get_provisioning_state(&mut file)?;
+    println!("\n=== AMT Information ===");
 
-    println!("\n=== AMT Provisioning State ===");
-    println!("State value: {}", state);
-    println!("State description: {}", provisioning_state_to_string(state));
+    match get_provisioning_state(&mut file) {
+        Ok(state) => {
+            println!(
+                "Provisioning State: {} - {}",
+                state,
+                provisioning_state_to_string(state)
+            );
+        }
+        Err(e) => eprintln!("Failed to get provisioning state: {}", e),
+    }
+
+    match get_provisioning_mode(&mut file) {
+        Ok(mode) => {
+            println!(
+                "Provisioning Mode: {} - {}",
+                mode,
+                provisioning_mode_to_string(mode)
+            );
+        }
+        Err(e) => eprintln!("Failed to get provisioning mode: {}", e),
+    }
+
+    match get_code_versions(&mut file) {
+        Ok(versions) => {
+            println!("\nFirmware Versions:");
+            for (description, version) in versions {
+                println!("  {}: {}", description, version);
+            }
+        }
+        Err(e) => eprintln!("\nFailed to get code versions: {}", e),
+    }
 
     Ok(())
 }
