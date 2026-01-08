@@ -1,0 +1,87 @@
+# MEI AMT Status Query
+
+A Rust program to query Intel Active Management Technology (AMT) provisioning status through the MEI (Management Engine Interface).
+
+## Features
+
+- Queries AMT provisioning state (pre-provisioning, in-provisioning, or post-provisioning)
+- Retrieves AMT provisioning mode (None, Enterprise, Small Business)
+- Lists firmware version information for all AMT components
+- Uses safe Rust with minimal `unsafe` code
+- Properly handles packed structs and alignment issues
+
+## Requirements
+
+- Linux system with Intel AMT
+- `/dev/mei0` or `/dev/mei` device available
+- MEI kernel module loaded (`mei_me`)
+
+## Dependencies
+
+```toml
+[dependencies]
+nix = { version = "0.29", features = ["ioctl"] }
+zerocopy = { version = "0.7", features = ["derive"] }
+```
+
+## Building
+
+```bash
+cargo build --release
+```
+
+## Usage
+
+```bash
+./target/release/mei
+```
+
+## Example Output
+
+```
+Opening /dev/mei0...
+Connecting to AMT/IAMTHIF client...
+Connected! Client properties:
+  Max message length: 128
+  Protocol version: 2
+
+=== AMT Information ===
+Provisioning State: 0 - Pre-provisioning (not configured)
+Provisioning Mode: 0 - None
+
+Firmware Versions:
+  AMT: 9.1.37.1002
+  Sku: Corporate
+  Build Number: 1002
+  Recovery Version: 9.1.37.1002
+  Recovery Build Num: 1002
+  Legacy Mode: False
+```
+
+## Technical Details
+
+### Protocol
+Uses the Intel AMT Host Interface (IAMTHIF) protocol, not MKHI. The IAMTHIF client UUID is `12f80028-b4b7-4b2d-aca8-46e0ff65814c`.
+
+### Key Implementation Details
+- UUID bytes use mixed endianness (first 3 fields are little-endian)
+- `MeiConnectClientData` is a union, not a struct
+- AMT Host Interface uses 12-byte request headers
+- Response parsing handles variable-length data correctly
+
+## References
+
+- Primary implementation based on: [mjg59/mei-amt-check](https://github.com/mjg59/mei-amt-check)
+- Command documentation: See `COMMAND_REFERENCES.md` for detailed sources
+- Linux MEI driver: [Kernel documentation](https://www.kernel.org/doc/html/latest/driver-api/mei/index.html)
+
+## Documentation
+
+- `README.md` - This file, usage and overview
+- `FINDINGS.md` - Technical deep-dive into the implementation and fixes
+- `COMMAND_REFERENCES.md` - Detailed documentation of AMT commands and sources
+- `CHANGELOG.md` - History of changes and fixes
+
+## License
+
+See LICENSE file.
