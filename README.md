@@ -56,7 +56,11 @@ This will display all available AMT information including provisioning state, fi
 ./target/release/mei unprovision enterprise
 ```
 
-**Warning:** Unprovisioning will remove AMT configuration. This operation requires appropriate permissions and may require a reboot to take full effect.
+**Important:** 
+- AMT must be in **post-provisioning state** (already configured) to unprovision
+- The tool will check the state and provide an error if AMT is not provisioned
+- Unprovisioning will remove AMT configuration
+- This operation requires appropriate permissions and may require a reboot to take full effect
 
 ### Help
 

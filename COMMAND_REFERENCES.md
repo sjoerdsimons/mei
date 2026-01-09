@@ -39,6 +39,11 @@ Based on UnprovisionCommand.h, this command removes AMT provisioning configurati
 - `0` (CFG_PROVISIONING_MODE_NONE) - Unprovision to none mode
 - `1` (CFG_PROVISIONING_MODE_ENTERPRISE) - Unprovision to enterprise mode
 
+**Prerequisites:**
+- AMT must be in **post-provisioning state** (state 2) for this command to work
+- Returns error 0x03 (AMT_STATUS_INVALID_AMT_MODE) if AMT is not provisioned
+- The tool checks provisioning state before attempting to unprovision
+
 **Important:** Unprovisioning will remove AMT configuration. This may require a system reboot to take full effect. Ensure you have appropriate permissions before running this command.
 
 ### GetAMTState Command

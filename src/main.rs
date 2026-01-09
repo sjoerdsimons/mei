@@ -708,8 +708,41 @@ fn main() -> io::Result<()> {
                 println!("Connecting to AMT/IAMTHIF client...");
                 let _client = connect_to_mei_client(&file, &AMT_UUID)?;
 
+                // Check current provisioning state first
+                print!("Checking current provisioning state... ");
+                match get_provisioning_state(&mut file) {
+                    Ok(state) => {
+                        println!("{}", provisioning_state_to_string(state));
+
+                        if state != PROVISIONING_STATE_POST {
+                            eprintln!();
+                            eprintln!(
+                                "✗ Likely cannot unprovision: AMT is not in post-provisioning state"
+                            );
+                            eprintln!(
+                                "  Current state: {} - {}",
+                                state,
+                                provisioning_state_to_string(state)
+                            );
+                            eprintln!();
+                            eprintln!(
+                                "  The unprovision command likely only works when AMT is already"
+                            );
+                            eprintln!(
+                                "  provisioned (post-provisioning state). Your AMT is currently"
+                            );
+                            eprintln!("  in pre-provisioning or in-provisioning state.");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("failed");
+                        eprintln!("✗ Could not query provisioning state: {}", e);
+                        return Err(e);
+                    }
+                }
+
                 println!(
-                    "Unprovisioning AMT with mode {} ({})...",
+                    "\nUnprovisioning AMT with mode {} ({})...",
                     mode,
                     provisioning_mode_to_string(mode)
                 );
