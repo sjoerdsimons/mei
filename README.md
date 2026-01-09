@@ -1,12 +1,16 @@
-# MEI AMT Status Query
+# MEI AMT Status Query and Management
 
-A Rust program to query Intel Active Management Technology (AMT) provisioning status through the MEI (Management Engine Interface).
+A Rust program to query and manage Intel Active Management Technology (AMT) through the MEI (Management Engine Interface).
 
 ## Features
 
+- **Query AMT Status**: View provisioning state, mode, firmware versions, and network configuration
+- **Unprovision AMT**: Remove provisioning configuration with specified mode
 - Queries AMT provisioning state (pre-provisioning, in-provisioning, or post-provisioning)
 - Retrieves AMT provisioning mode (None, Enterprise, Small Business)
 - Lists firmware version information for all AMT components
+- Displays LAN interface settings (IP, DHCP, MAC address, link status)
+- Queries FQDN and DNS suffix
 - Uses safe Rust with minimal `unsafe` code
 - Properly handles packed structs and alignment issues
 
@@ -32,8 +36,32 @@ cargo build --release
 
 ## Usage
 
+### Query AMT Information (default)
+
 ```bash
 ./target/release/mei
+```
+
+This will display all available AMT information including provisioning state, firmware versions, network configuration, etc.
+
+### Unprovision AMT
+
+```bash
+# Unprovision to none mode
+./target/release/mei unprovision 0
+./target/release/mei unprovision none
+
+# Unprovision to enterprise mode
+./target/release/mei unprovision 1
+./target/release/mei unprovision enterprise
+```
+
+**Warning:** Unprovisioning will remove AMT configuration. This operation requires appropriate permissions and may require a reboot to take full effect.
+
+### Help
+
+```bash
+./target/release/mei --help
 ```
 
 ## Example Output

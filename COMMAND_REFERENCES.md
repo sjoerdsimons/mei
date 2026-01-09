@@ -22,10 +22,24 @@ These commands are from Intel's official open-source implementation:
 |---------|-------|-------------|-------------|--------|
 | `AMT_HOST_IF_GET_AMT_STATE_REQUEST` | `0x01000001` | Get AMT state (link status, crypto fuse, flash protection, ME reset) | GetAMTStateCommand.h | ⚠️ Not supported on AMT 9.1.x |
 | `AMT_HOST_IF_CODE_VERSIONS_REQUEST` | `0x0400001A` | Get firmware version information | GetCodeVersionCommand.h | ✅ Verified |
+| `AMT_HOST_IF_UNPROVISION_REQUEST` | `0x04000010` | Unprovision AMT with specified mode | UnprovisionCommand.h | ✅ Official |
 | `AMT_HOST_IF_PROVISIONING_STATE_REQUEST` | `0x04000011` | Get provisioning state | GetProvisioningStateCommand.h | ✅ Verified |
 | `AMT_HOST_IF_DNS_SUFFIX_REQUEST` | `0x04000036` | Get DNS suffix | GetDNSSuffixCommand.h | ✅ Official |
 | `AMT_HOST_IF_LAN_INTERFACE_SETTINGS_REQUEST` | `0x04000048` | Get LAN interface settings | GetLanInterfaceSettingsCommand.h | ✅ Official |
 | `AMT_HOST_IF_FQDN_REQUEST` | `0x04000056` | Get fully qualified domain name | GetFQDNCommand.h | ✅ Official |
+
+### Unprovision Command
+
+Based on UnprovisionCommand.h, this command removes AMT provisioning configuration.
+
+**Request:** Command `0x04000010` + 4-byte mode value (little-endian uint32)
+**Response:** Status code only (no data)
+
+**Provisioning Modes:**
+- `0` (CFG_PROVISIONING_MODE_NONE) - Unprovision to none mode
+- `1` (CFG_PROVISIONING_MODE_ENTERPRISE) - Unprovision to enterprise mode
+
+**Important:** Unprovisioning will remove AMT configuration. This may require a system reboot to take full effect. Ensure you have appropriate permissions before running this command.
 
 ### GetAMTState Command
 

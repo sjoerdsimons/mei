@@ -91,6 +91,7 @@ const AMT_HOST_IF_GET_AMT_STATE_REQUEST: u32 = 0x01000001;
 const AMT_HOST_IF_DNS_SUFFIX_REQUEST: u32 = 0x04000036;
 const AMT_HOST_IF_LAN_INTERFACE_SETTINGS_REQUEST: u32 = 0x04000048;
 const AMT_HOST_IF_FQDN_REQUEST: u32 = 0x04000056;
+const AMT_HOST_IF_UNPROVISION_REQUEST: u32 = 0x04000010;
 
 // Experimental commands - sources documented in COMMAND_REFERENCES.md
 const AMT_HOST_IF_FEATURES_STATE_REQUEST: u32 = 0x04000017;
@@ -105,6 +106,10 @@ const AMT_UNICODE_STRING_LEN: usize = 20;
 const PROVISIONING_STATE_PRE: u32 = 0;
 const PROVISIONING_STATE_IN: u32 = 1;
 const PROVISIONING_STATE_POST: u32 = 2;
+
+// Provisioning modes for unprovision command
+const PROVISIONING_MODE_NONE: u32 = 0;
+const PROVISIONING_MODE_ENTERPRISE: u32 = 1;
 
 fn connect_to_mei_client(file: &File, uuid: &[u8; 16]) -> io::Result<MeiClient> {
     let mut connect_data = MeiConnectClientData {
@@ -595,6 +600,37 @@ fn get_dns_suffix(file: &mut File) -> io::Result<String> {
     Ok(suffix)
 }
 
+fn unprovision_amt(file: &mut File, mode: u32) -> io::Result<()> {
+    // Send unprovision command with the specified mode
+    let mode_bytes = mode.to_le_bytes();
+    let response_buf =
+        send_amt_request_with_data(file, AMT_HOST_IF_UNPROVISION_REQUEST, &mode_bytes)?;
+
+    if response_buf.len() < std::mem::size_of::<AmtHostIfRespHeader>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Response too short",
+        ));
+    }
+
+    let response = AmtHostIfRespHeader::read_from_prefix(&response_buf)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Failed to parse response"))?;
+
+    let status = unsafe { std::ptr::addr_of!(response.status).read_unaligned() };
+    if status != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "AMT error 0x{:08x}: {}",
+                status,
+                amt_status_to_string(status)
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
 fn provisioning_state_to_string(state: u32) -> &'static str {
     match state {
         PROVISIONING_STATE_PRE => "Pre-provisioning (not configured)",
@@ -613,7 +649,100 @@ fn provisioning_mode_to_string(mode: u32) -> &'static str {
     }
 }
 
+fn print_usage() {
+    eprintln!("Intel AMT/MEI Query Tool");
+    eprintln!();
+    eprintln!("USAGE:");
+    eprintln!("  mei                          Query AMT information (default)");
+    eprintln!("  mei unprovision <mode>       Unprovision AMT with specified mode");
+    eprintln!();
+    eprintln!("UNPROVISION MODES:");
+    eprintln!("  0 or none        Unprovision to none mode");
+    eprintln!("  1 or enterprise  Unprovision to enterprise mode");
+    eprintln!();
+    eprintln!("EXAMPLES:");
+    eprintln!("  mei                    # Query AMT status");
+    eprintln!("  mei unprovision 0      # Unprovision to none mode");
+    eprintln!("  mei unprovision 1      # Unprovision to enterprise mode");
+    eprintln!();
+}
+
 fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Parse command line arguments
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "help" | "--help" | "-h" => {
+                print_usage();
+                return Ok(());
+            }
+            "unprovision" => {
+                if args.len() < 3 {
+                    eprintln!("Error: unprovision command requires a mode argument");
+                    eprintln!();
+                    print_usage();
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Missing mode argument",
+                    ));
+                }
+
+                let mode = match args[2].as_str() {
+                    "0" | "none" => PROVISIONING_MODE_NONE,
+                    "1" | "enterprise" => PROVISIONING_MODE_ENTERPRISE,
+                    _ => {
+                        eprintln!("Error: Invalid mode '{}'", args[2]);
+                        eprintln!();
+                        print_usage();
+                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid mode"));
+                    }
+                };
+
+                println!("Opening /dev/mei0...");
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open("/dev/mei0")?;
+
+                println!("Connecting to AMT/IAMTHIF client...");
+                let _client = connect_to_mei_client(&file, &AMT_UUID)?;
+
+                println!(
+                    "Unprovisioning AMT with mode {} ({})...",
+                    mode,
+                    provisioning_mode_to_string(mode)
+                );
+
+                match unprovision_amt(&mut file, mode) {
+                    Ok(()) => {
+                        println!("✓ Unprovision command completed successfully");
+                        println!(
+                            "AMT has been unprovisioned to {} mode",
+                            provisioning_mode_to_string(mode)
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("✗ Unprovision command failed: {}", e);
+                        return Err(e);
+                    }
+                }
+
+                return Ok(());
+            }
+            _ => {
+                eprintln!("Error: Unknown command '{}'", args[1]);
+                eprintln!();
+                print_usage();
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Unknown command",
+                ));
+            }
+        }
+    }
+
+    // Default: query mode
     println!("Opening /dev/mei0...");
 
     let mut file = OpenOptions::new()
