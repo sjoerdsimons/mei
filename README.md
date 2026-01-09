@@ -1,6 +1,6 @@
 # MEI AMT Status Query and Management
 
-*** Note this is a one evening "vibe" coding experiment fully written by co-pilot, do with that as you wish
+*** Note this is a one evening "vibe" coding experiment fully written by co-pilot, do with that as you wish ***
 
 A Rust program to query and manage Intel Active Management Technology (AMT) through the MEI (Management Engine Interface).
 
