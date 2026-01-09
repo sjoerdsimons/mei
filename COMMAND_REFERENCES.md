@@ -20,11 +20,33 @@ These commands are from Intel's official open-source implementation:
 
 | Command | Value | Description | Header File | Status |
 |---------|-------|-------------|-------------|--------|
+| `AMT_HOST_IF_GET_AMT_STATE_REQUEST` | `0x01000001` | Get AMT state (link status, crypto fuse, flash protection, ME reset) | GetAMTStateCommand.h | ⚠️ Not supported on AMT 9.1.x |
 | `AMT_HOST_IF_CODE_VERSIONS_REQUEST` | `0x0400001A` | Get firmware version information | GetCodeVersionCommand.h | ✅ Verified |
 | `AMT_HOST_IF_PROVISIONING_STATE_REQUEST` | `0x04000011` | Get provisioning state | GetProvisioningStateCommand.h | ✅ Verified |
 | `AMT_HOST_IF_DNS_SUFFIX_REQUEST` | `0x04000036` | Get DNS suffix | GetDNSSuffixCommand.h | ✅ Official |
 | `AMT_HOST_IF_LAN_INTERFACE_SETTINGS_REQUEST` | `0x04000048` | Get LAN interface settings | GetLanInterfaceSettingsCommand.h | ✅ Official |
 | `AMT_HOST_IF_FQDN_REQUEST` | `0x04000056` | Get fully qualified domain name | GetFQDNCommand.h | ✅ Official |
+
+### GetAMTState Command
+
+Based on GetAMTStateCommand.h, this command queries various AMT state variables by passing a UUID identifier.
+
+**Note:** This command returns error 0x21 (AMT_STATUS_UNSUPPORTED_OBJECT) on AMT version 9.1.37. It may be supported in newer AMT versions (10.0+).
+
+**Request:** Command `0x01000001` + 16-byte UUID (state variable identifier)
+**Response:** 16-byte UUID + 4-byte array size + state data
+
+**AMT_UUID_LINK_STATE** (`00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01`):
+Returns 5 bytes of state data:
+```rust
+struct STATE_DATA {
+    uint8_t LinkStatus;         // 0 = down, 1 = up
+    uint8_t reserved;
+    uint8_t CryptoFuse;         // 0 = disabled, 1 = enabled
+    uint8_t FlashProtection;    // 0 = disabled, 1 = enabled
+    uint8_t LastMEResetType;    // 0 = none, 1 = ME reset, 2 = global reset, 3 = exception
+}
+```
 
 ### LAN Interface Settings Structure
 
@@ -42,6 +64,8 @@ struct LAN_SETTINGS {
 ```
 
 Note: `AMT_HOST_IF_LAN_INTERFACE_SETTINGS_REQUEST` requires an interface ID parameter (typically 0 for the first interface).
+
+**Important:** Some AMT commands may return limited or no data when AMT is in pre-provisioning state. LAN interface settings may only be fully available after AMT is provisioned.
 
 **Warning:** These commands are based on various Intel AMT documentation and reverse engineering efforts. They may not work on all AMT versions or may require specific provisioning states.
 
@@ -128,3 +152,40 @@ The experimental commands are provided for research and diagnostic purposes. The
 - Implemented with graceful failure handling
 
 Always test on non-production systems first.
+
+## Structure Layouts
+
+### LAN_SETTINGS (0x04000048 response)
+
+Complete structure based on Intel LMS GetLanInterfaceSettingsCommand.h:
+
+```
+Offset | Size | Type          | Field        | Description
+-------|------|---------------|--------------|---------------------------
+0      | 4    | AMT_BOOLEAN   | Enabled      | 0=disabled, 1=enabled
+4      | 4    | IPv4_ADDRESS  | Ipv4Address  | IP address in network byte order
+8      | 4    | AMT_BOOLEAN   | DhcpEnabled  | 0=static, 1=DHCP
+12     | 1    | uint8_t       | DhcpIpMode   | DHCP IP mode
+13     | 1    | uint8_t       | LinkStatus   | 0=down, 1=up
+14     | 6    | uint8_t[6]    | MacAddress   | MAC address
+-------|------|---------------|--------------|---------------------------
+Total: 20 bytes
+```
+
+**Note:** 
+- AMT_BOOLEAN is 4 bytes (uint32_t), not 1 byte
+- IPv4 address is stored in network byte order (big-endian)
+- Structure is packed (#pragma pack(1))
+
+### Example Output
+
+```
+LAN Interface Settings (interface 0):
+  Raw data (20 bytes): [01 00 00 00 c0 a8 01 64 01 00 00 00 00 01 a4 5e 60 88 61 b4]
+  Enabled: true
+  IPv4 Address: 192.168.1.100
+  DHCP Enabled: true
+  DHCP IP Mode: 0x00
+  Link Status: 0x01 (Up)
+  MAC Address: a4:5e:60:88:61:b4
+```
